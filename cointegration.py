@@ -24,20 +24,33 @@ from statsmodels.tsa.stattools import coint
 from store import get_connection, load_prices, ticker_names
 
 
-def industry_universe(keyword: str) -> list[str]:
+def industry_universe(keyword: str, min_marcap: float | None = None) -> list[str]:
     """KOSPI tickers whose KRX-DESC Industry text matches `keyword` (regex, OR-able with |).
 
     KRX's own industry classification is coarse (e.g. Samsung Electronics is
     filed under "통신 및 방송 장비 제조업", not "반도체 제조업"), so this is
     meant to be given a few related industry strings at once, not one exact
     match - see cointegration's --industry-keyword help text for an example.
+
+    `min_marcap` (KRW) drops names below that market cap. This is meant to
+    cut out micro-caps whose price series are erratic enough that
+    Engle-Granger can flag "cointegration" against a large-cap target just
+    from sharing a long-run uptrend, not from a real short-run relationship -
+    it's a sanity filter, not a guarantee the survivors are stable.
     """
     import FinanceDataReader as fdr
 
     desc = fdr.StockListing("KRX-DESC")
     kospi = desc[desc["Market"] == "KOSPI"]
     matched = kospi[kospi["Industry"].str.contains(keyword, na=False, regex=True)]
-    return matched["Code"].tolist()
+    codes = matched["Code"].tolist()
+
+    if min_marcap is not None:
+        listing = fdr.StockListing("KOSPI")[["Code", "Marcap"]]
+        marcap_by_code = dict(zip(listing["Code"], listing["Marcap"]))
+        codes = [c for c in codes if marcap_by_code.get(c, 0) >= min_marcap]
+
+    return codes
 
 
 def screen_pairs(
@@ -78,6 +91,11 @@ def main() -> None:
         help='Restrict candidates to KOSPI tickers whose Industry matches this regex, '
              'e.g. "반도체|전자부품|통신 및 방송 장비". Default: whole KOSPI universe.',
     )
+    parser.add_argument(
+        "--min-marcap", type=float, default=None,
+        help="Drop candidates below this market cap in KRW, e.g. 500000000000 for 5000억. "
+             "Only applies together with --industry-keyword.",
+    )
     args = parser.parse_args()
 
     conn = get_connection()
@@ -90,8 +108,9 @@ def main() -> None:
 
     candidates = None
     if args.industry_keyword:
-        candidates = industry_universe(args.industry_keyword)
-        print(f"Industry filter matched {len(candidates)} KOSPI tickers")
+        candidates = industry_universe(args.industry_keyword, min_marcap=args.min_marcap)
+        cap_note = f", marcap >= {args.min_marcap:,.0f}" if args.min_marcap else ""
+        print(f"Industry filter matched {len(candidates)} KOSPI tickers{cap_note}")
 
     n_candidates = len(candidates) if candidates is not None else prices.shape[1] - 1
     print(f"Testing {target_name} ({args.target}) against {n_candidates} tickers, {len(prices)} days available")
