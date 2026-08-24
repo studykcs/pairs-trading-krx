@@ -1,20 +1,28 @@
 """Backtest a z-score pairs-trading strategy on one cointegrated pair.
 
-The hedge ratio (beta) is estimated once via OLS on log prices over the
-whole sample - a simple choice that has look-ahead bias (later data informs
-early trades). A walk-forward re-estimation would remove that but adds
-complexity; treat these results as an upper-bound sanity check, not a
-production backtest.
+Two hedge-ratio methods:
+
+  static (old default): OLS on log prices over the *whole* sample, once.
+  Simple, but has look-ahead bias - beta used for a 2023 trade is informed
+  by 2026 data that didn't exist yet. Useful only as an upper-bound sanity
+  check.
+
+  walkforward (default now): beta is re-estimated every `--reestimate-every`
+  trading days, using only the trailing `--beta-window` days *before* that
+  point, and held constant until the next re-estimation. Each day only ever
+  trades on a beta computed from data that would have actually been
+  available at the time - no look-ahead.
 
 Strategy: rolling z-score of the spread (log_target - beta * log_pair).
 Enter when |z| crosses `--entry`, flatten when it falls back inside
-`--exit-z`. Position is lagged one day (trade on the next bar's return,
-not the bar that generated the signal).
+`--exit-z`. Position is additionally lagged one day (trade on the next
+bar's return, not the bar that generated the signal).
 
 Usage
 -----
-    python backtest.py --target 005930 --pair 000660
-    python backtest.py --target 005930 --pair 000660 --window 60 --entry 2.0 --exit-z 0.5
+    python backtest.py --target 000660 --pair 005930
+    python backtest.py --target 000660 --pair 005930 --method static
+    python backtest.py --target 000660 --pair 005930 --beta-window 120 --reestimate-every 20
 """
 
 from __future__ import annotations
@@ -35,18 +43,25 @@ def hedge_ratio(log_target: pd.Series, log_pair: pd.Series) -> tuple[float, floa
     return float(model.params.iloc[1]), float(model.params.iloc[0])
 
 
-def run_backtest(
-    target: pd.Series, pair: pd.Series, window: int = 60, entry: float = 2.0, exit_z: float = 0.5
-) -> tuple[pd.DataFrame, dict]:
-    log_t = np.log(target)
-    log_p = np.log(pair)
-    beta, alpha = hedge_ratio(log_t, log_p)
-    spread = log_t - beta * log_p
+def walk_forward_beta(
+    log_t: pd.Series, log_p: pd.Series, beta_window: int = 120, reestimate_every: int = 20
+) -> pd.Series:
+    """Piecewise-constant beta, re-estimated periodically from trailing data only.
 
-    roll_mean = spread.rolling(window).mean()
-    roll_std = spread.rolling(window).std()
-    z = (spread - roll_mean) / roll_std
+    beta.iloc[i] uses only log_t/log_p.iloc[i-beta_window:i] - strictly
+    before i - so it's information a trader would actually have had on day i.
+    NaN until enough history has accumulated (no trading before that).
+    """
+    betas = pd.Series(index=log_t.index, dtype=float)
+    last_beta = float("nan")
+    for i in range(len(log_t)):
+        if i >= beta_window and i % reestimate_every == 0:
+            last_beta, _ = hedge_ratio(log_t.iloc[i - beta_window : i], log_p.iloc[i - beta_window : i])
+        betas.iloc[i] = last_beta
+    return betas
 
+
+def _positions_from_zscore(z: pd.Series, entry: float, exit_z: float) -> pd.Series:
     pos, positions = 0, []
     for zi in z:
         if pd.isna(zi):
@@ -60,11 +75,10 @@ def run_backtest(
         elif abs(zi) < exit_z:
             pos = 0
         positions.append(pos)
+    return pd.Series(positions, index=z.index).shift(1).fillna(0)  # trade next bar, not signal bar
 
-    position = pd.Series(positions, index=z.index).shift(1).fillna(0)  # trade next bar, not signal bar
-    spread_ret = log_t.diff() - beta * log_p.diff()
-    strategy_ret = (position * spread_ret).fillna(0)
 
+def _summarize(position: pd.Series, strategy_ret: pd.Series, beta_series: pd.Series) -> tuple[pd.DataFrame, dict]:
     equity = (1 + strategy_ret).cumprod()
     running_max = equity.cummax()
     drawdown = equity / running_max - 1
@@ -78,19 +92,54 @@ def run_backtest(
     )
 
     stats = {
-        "beta": beta,
-        "alpha": alpha,
+        "beta_mean": float(beta_series.mean()),
+        "beta_last": float(beta_series.iloc[-1]) if len(beta_series) else float("nan"),
         "total_return": equity.iloc[-1] - 1 if len(equity) else float("nan"),
         "sharpe": sharpe,
         "max_drawdown": drawdown.min(),
         "n_trades": n_trades,
         "n_days": len(strategy_ret),
     }
-
     df = pd.DataFrame({
-        "z": z, "position": position, "strategy_ret": strategy_ret,
-        "equity": equity, "drawdown": drawdown,
+        "beta": beta_series, "z": None, "position": position,
+        "strategy_ret": strategy_ret, "equity": equity, "drawdown": drawdown,
     })
+    return df, stats
+
+
+def run_backtest_static(
+    target: pd.Series, pair: pd.Series, window: int = 60, entry: float = 2.0, exit_z: float = 0.5
+) -> tuple[pd.DataFrame, dict]:
+    log_t, log_p = np.log(target), np.log(pair)
+    beta, _ = hedge_ratio(log_t, log_p)
+    beta_series = pd.Series(beta, index=log_t.index)
+    spread = log_t - beta * log_p
+
+    z = (spread - spread.rolling(window).mean()) / spread.rolling(window).std()
+    position = _positions_from_zscore(z, entry, exit_z)
+    spread_ret = log_t.diff() - beta * log_p.diff()
+    strategy_ret = (position * spread_ret).fillna(0)
+
+    df, stats = _summarize(position, strategy_ret, beta_series)
+    df["z"] = z
+    return df, stats
+
+
+def run_backtest_walkforward(
+    target: pd.Series, pair: pd.Series, beta_window: int = 120, reestimate_every: int = 20,
+    z_window: int = 60, entry: float = 2.0, exit_z: float = 0.5,
+) -> tuple[pd.DataFrame, dict]:
+    log_t, log_p = np.log(target), np.log(pair)
+    beta_series = walk_forward_beta(log_t, log_p, beta_window, reestimate_every)
+    spread = log_t - beta_series * log_p
+
+    z = (spread - spread.rolling(z_window).mean()) / spread.rolling(z_window).std()
+    position = _positions_from_zscore(z, entry, exit_z)
+    spread_ret = log_t.diff() - beta_series * log_p.diff()  # beta[i] only ever used data before i
+    strategy_ret = (position * spread_ret).fillna(0)
+
+    df, stats = _summarize(position, strategy_ret, beta_series)
+    df["z"] = z
     return df, stats
 
 
@@ -98,7 +147,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target", default="005930")
     parser.add_argument("--pair", required=True)
-    parser.add_argument("--window", type=int, default=60, help="Rolling window for the spread z-score")
+    parser.add_argument("--method", choices=["static", "walkforward"], default="walkforward")
+    parser.add_argument("--window", type=int, default=60, help="[static] rolling window for the spread z-score")
+    parser.add_argument("--beta-window", type=int, default=120, help="[walkforward] trailing days used per beta estimate")
+    parser.add_argument("--reestimate-every", type=int, default=20, help="[walkforward] days between beta re-estimates")
+    parser.add_argument("--z-window", type=int, default=60, help="[walkforward] rolling window for the spread z-score")
     parser.add_argument("--entry", type=float, default=2.0, help="|z| to enter a position")
     parser.add_argument("--exit-z", type=float, default=0.5, help="|z| to flatten a position")
     parser.add_argument("--out", default=None, help="Optional CSV path for the day-by-day series")
@@ -112,16 +165,22 @@ def main() -> None:
     names = ticker_names(conn)
     both = prices[[args.target, args.pair]].dropna()
 
-    df, stats = run_backtest(both[args.target], both[args.pair], args.window, args.entry, args.exit_z)
+    if args.method == "static":
+        df, stats = run_backtest_static(both[args.target], both[args.pair], args.window, args.entry, args.exit_z)
+    else:
+        df, stats = run_backtest_walkforward(
+            both[args.target], both[args.pair], args.beta_window, args.reestimate_every,
+            args.z_window, args.entry, args.exit_z,
+        )
 
     t_name = names.get(args.target, args.target)
     p_name = names.get(args.pair, args.pair)
-    print(f"{t_name} ({args.target}) vs {p_name} ({args.pair}) - {stats['n_days']} days")
-    print(f"  hedge ratio (beta): {stats['beta']:.4f}")
-    print(f"  total return:       {stats['total_return'] * 100:+.2f}%")
+    print(f"{t_name} ({args.target}) vs {p_name} ({args.pair}) - {stats['n_days']} days - method={args.method}")
+    print(f"  beta (mean / last):  {stats['beta_mean']:.4f} / {stats['beta_last']:.4f}")
+    print(f"  total return:        {stats['total_return'] * 100:+.2f}%")
     print(f"  Sharpe (annualized): {stats['sharpe']:.2f}")
-    print(f"  max drawdown:       {stats['max_drawdown'] * 100:.2f}%")
-    print(f"  trades:             {stats['n_trades']}")
+    print(f"  max drawdown:        {stats['max_drawdown'] * 100:.2f}%")
+    print(f"  trades:              {stats['n_trades']}")
 
     if args.out:
         df.to_csv(args.out, encoding="utf-8-sig")
