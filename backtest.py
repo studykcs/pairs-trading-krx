@@ -36,10 +36,19 @@ import statsmodels.api as sm
 from store import get_connection, load_prices, ticker_names
 
 
-def hedge_ratio(log_target: pd.Series, log_pair: pd.Series) -> tuple[float, float]:
-    """OLS log_target ~ alpha + beta * log_pair. Returns (beta, alpha)."""
+def hedge_ratio(log_target: pd.Series, log_pair: pd.Series) -> tuple[float, float] | None:
+    """OLS log_target ~ alpha + beta * log_pair. Returns (beta, alpha), or None.
+
+    Returns None if log_pair is (near-)constant over the window - a frozen
+    or halted stock - which makes the design matrix singular and leaves
+    statsmodels with no slope coefficient to return.
+    """
     X = sm.add_constant(log_pair)
+    if X.shape[1] < 2:
+        return None
     model = sm.OLS(log_target, X).fit()
+    if len(model.params) < 2:
+        return None
     return float(model.params.iloc[1]), float(model.params.iloc[0])
 
 
@@ -56,7 +65,10 @@ def walk_forward_beta(
     last_beta = float("nan")
     for i in range(len(log_t)):
         if i >= beta_window and i % reestimate_every == 0:
-            last_beta, _ = hedge_ratio(log_t.iloc[i - beta_window : i], log_p.iloc[i - beta_window : i])
+            result = hedge_ratio(log_t.iloc[i - beta_window : i], log_p.iloc[i - beta_window : i])
+            if result is not None:
+                last_beta, _ = result
+            # else: pair leg was flat (halted/frozen) over this window - keep the last valid beta
         betas.iloc[i] = last_beta
     return betas
 
@@ -79,7 +91,12 @@ def _positions_from_zscore(z: pd.Series, entry: float, exit_z: float) -> pd.Seri
 
 
 def _summarize(position: pd.Series, strategy_ret: pd.Series, beta_series: pd.Series) -> tuple[pd.DataFrame, dict]:
-    equity = (1 + strategy_ret).cumprod()
+    # strategy_ret is built from log-price differences (spread_ret = log_t.diff() - beta*log_p.diff()),
+    # i.e. it's already a log return, not a simple one. Compounding it with (1+r).cumprod() silently
+    # treats it as simple returns - fine for small moves, but distorts equity/drawdown once |r| gets
+    # large (exactly the regime this backtest is meant to stress-test). exp(cumsum()) compounds log
+    # returns correctly.
+    equity = np.exp(strategy_ret.cumsum())
     running_max = equity.cummax()
     drawdown = equity / running_max - 1
 

@@ -57,8 +57,13 @@ def regime_labels(
             train = features.iloc[i - gmm_window : i].dropna()
             if len(train) >= gmm_window // 2:
                 model = GaussianMixture(n_components=2, random_state=0, n_init=3).fit(train.values)
-                # "calm" = whichever component centers closer to z=0
-                calm_id = int(np.argmin(np.abs(model.means_[:, 0])))
+                # "calm" = whichever component has the lower mean spread volatility (feature index 1).
+                # Sorting on z's mean (feature index 0) instead is unstable: both components' z-means
+                # can sit close to 0 depending on the window's sign balance, so argmin(|mean_z|) can
+                # flip which component is "calm" between refits (EM label switching) even when the
+                # underlying calm/turbulent split hasn't changed. Volatility is unsigned and separates
+                # the two regimes far more consistently across refits.
+                calm_id = int(np.argmin(model.means_[:, 1]))
         if model is not None:
             row = features.iloc[i]
             if row.notna().all():

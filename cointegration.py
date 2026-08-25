@@ -96,6 +96,11 @@ def main() -> None:
         help="Drop candidates below this market cap in KRW, e.g. 500000000000 for 5000억. "
              "Only applies together with --industry-keyword.",
     )
+    parser.add_argument(
+        "--tickers", default=None,
+        help="Comma-separated explicit candidate list (overrides --industry-keyword), "
+             'e.g. "055550,086790,316140" for a hand-picked universe.',
+    )
     args = parser.parse_args()
 
     conn = get_connection()
@@ -107,7 +112,10 @@ def main() -> None:
     target_name = names.get(args.target, args.target)
 
     candidates = None
-    if args.industry_keyword:
+    if args.tickers:
+        candidates = [t.strip() for t in args.tickers.split(",")]
+        print(f"Explicit ticker list: {len(candidates)} candidates")
+    elif args.industry_keyword:
         candidates = industry_universe(args.industry_keyword, min_marcap=args.min_marcap)
         cap_note = f", marcap >= {args.min_marcap:,.0f}" if args.min_marcap else ""
         print(f"Industry filter matched {len(candidates)} KOSPI tickers{cap_note}")
