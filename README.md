@@ -107,7 +107,15 @@ impact_bps = impact_coef × daily_vol_bps × sqrt(order_value / ADV)
 ADV is trailing average daily traded **value** (거래대금, KRW), lagged one day
 so the day's own volume cannot leak into its own cost estimate. If ADV is
 missing for a window, `costs.py` **raises rather than substituting a number** —
-a fabricated ADV makes an illiquid pair look tradable.
+a fabricated ADV makes an illiquid pair look tradable. (`--allow-missing-adv`
+overrides this and prices impact at zero; it understates cost and exists only
+for comparison runs.)
+
+**ADV coverage**: 거래대금 is backfilled for all 2,856 trading days
+(2015-01-02 – 2026-08-21). 1,207 of 2.63M rows (0.05%, 6 tickers) remain NULL —
+names that sat on KOSDAQ during 2023–2024 while `collect.py`'s endpoint
+(`stk_bydd_trd`) covers 유가증권/KOSPI only. Those rows stay NULL rather than
+being imputed, so a backtest touching them fails loudly.
 
 **Verified scaling** (005930/000660, identical position path, varying capital):
 
@@ -127,17 +135,20 @@ should.
 
 | | flat `--cost-bps 15` | `--realistic-costs` |
 |---|---|---|
-| total cost drag | 4.50% | **10.60%** |
+| total cost drag | 4.50% | **16.18%** |
 | ├ commission | — | 0.73% |
 | ├ tax (sell only) | — | 3.67% |
 | ├ half-spread | — | 2.45% |
-| ├ impact (ADV) | — | 0.39% |
+| ├ **impact (ADV)** | **0.00%** | **5.97%** |
 | └ **borrow (short leg)** | **0.00%** | **3.36%** |
-| net total return | −64.14% | −66.26% |
+| net total return | −64.14% | −68.09% |
 
-The flat model understates cost by **2.4×** here, and the single largest
-omission is the borrow fee — a cost that is invisible to any per-turnover
-model because it accrues with *time held*, not with trading.
+The flat model understates cost by **3.6×** here, and the two largest
+omissions are precisely the two a per-turnover model structurally cannot
+see: impact, which depends on order size against the name's liquidity
+(322000 is far thinner than the 005930-class names the 15bp figure implicitly
+assumes), and borrow, which accrues with *time held* rather than with
+trading.
 
 `impact_coef` (default 0.6) is a **documented assumption, not a fitted
 value** — there is no execution data here to calibrate against. Treat the
