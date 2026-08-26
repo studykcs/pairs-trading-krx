@@ -69,6 +69,13 @@ def run_strategy(
         zi, regime_i, ret_i = z.iloc[i], regime.iloc[i], spread_ret.iloc[i]
 
         if pos != 0:
+            # `pos` is still the value decided on the PREVIOUS iteration - today's
+            # entry/exit branch below hasn't run yet - so this is positions[i-1] *
+            # spread_ret[i], the same product `gross_ret` computes further down via
+            # position.shift(1) * spread_ret. entry_cum is therefore already the
+            # running sum of realized (shift-consistent) daily P&L, not a preview of
+            # today's not-yet-decided position. Do not lag ret_i again here - that
+            # would pair today's position with yesterday's return instead of today's.
             entry_cum += pos * ret_i  # cumulative log-return of the open trade so far
             if entry_cum < -abs(stop_loss):
                 pos = 0

@@ -115,6 +115,7 @@ def leg_cost_series(
     capital: float,
     model: CostModel,
     vol_window: int = 60,
+    adv_window: int = 20,
     allow_missing_adv: bool = False,
 ) -> pd.DataFrame:
     """Per-day cost of running ONE leg, as a fraction of `capital`.
@@ -145,8 +146,10 @@ def leg_cost_series(
     # Trailing ADV, not same-day: on the day you trade you do not yet know
     # that day's full traded value, and using it would leak look-ahead
     # liquidity into the cost estimate.
-    adv_trailing = adv_aligned.shift(1).rolling(20, min_periods=5).mean()
-    daily_vol = price_ret.rolling(vol_window, min_periods=10).std()
+    adv_trailing = adv_aligned.shift(1).rolling(adv_window, min_periods=5).mean()
+    # Trailing vol, not same-day: impact is estimated at order-placement time,
+    # before today's return is known, so today's realized vol cannot feed it.
+    daily_vol = price_ret.shift(1).rolling(vol_window, min_periods=10).std()
 
     commission = traded_value / capital * (model.commission_bps / 10_000)
     half_spread = traded_value / capital * (model.half_spread_bps / 10_000)
