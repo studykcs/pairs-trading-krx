@@ -26,12 +26,18 @@ import numpy as np
 import pandas as pd
 
 from costs import CostModel
-from store import get_connection, load_field, load_prices, ticker_names
+from store import get_connection, load_field, load_prices, period_label, ticker_names, warn_thin_warmup
 from strategy import run_strategy
 
 COMPONENTS = ["commission", "tax", "half_spread", "impact", "borrow"]
 IMPACT_SWEEP_COEFS = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
 REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+
+# run_strategy() is always called here with its defaults (beta_window=120,
+# z_window=60, gmm_window=250, use_gmm=True) - this script exposes no flags
+# to override them, so the warmup reference is the same fixed 250 used by
+# gmm_strategy.py/strategy.py's own defaults, not something computed here.
+REFERENCE_GMM_WINDOW = 250
 
 
 def _git_commit() -> str:
@@ -84,16 +90,12 @@ def main() -> None:
     args = parser.parse_args()
 
     conn = get_connection()
-    prices = load_prices(conn)
+    prices = load_prices(conn, start=args.start, end=args.end)
     if args.target not in prices.columns or args.pair not in prices.columns:
         raise SystemExit("Target or pair ticker not found in stored prices.")
 
     names = ticker_names(conn)
     both = prices[[args.target, args.pair]].dropna()
-    if args.start:
-        both = both.loc[both.index >= args.start]
-    if args.end:
-        both = both.loc[both.index <= args.end]
     if both.empty:
         raise SystemExit("No overlapping price data for the given tickers/date range.")
 
@@ -126,7 +128,8 @@ def main() -> None:
     print("COST MODEL COMPARISON - flat (strategy.py --cost-bps) vs realistic (costs.py)")
     print("=" * 72)
     print(f"pair:             {t_name} ({args.target}) vs {p_name} ({args.pair})")
-    print(f"period:           {both.index.min().date()} .. {both.index.max().date()}  ({len(both)} trading days)")
+    print(f"period:           {period_label(both.index)}")
+    warn_thin_warmup(len(both), REFERENCE_GMM_WINDOW)
     print(f"capital:          {args.capital:,.0f} KRW")
     print(f"flat cost_bps:    {args.cost_bps}")
     print("realistic CostModel:")

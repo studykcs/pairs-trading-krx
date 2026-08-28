@@ -35,7 +35,7 @@ import pandas as pd
 from backtest import _summarize, walk_forward_beta
 from costs import CostModel, pair_cost_series
 from gmm_strategy import regime_labels
-from store import get_connection, load_field, load_prices, ticker_names
+from store import get_connection, load_field, load_prices, period_label, ticker_names, warn_thin_warmup
 
 
 def run_strategy(
@@ -156,15 +156,22 @@ def main() -> None:
                    help="Square-root impact coefficient (assumption, not calibrated - see costs.py)")
     g.add_argument("--allow-missing-adv", action="store_true",
                    help="Price impact at zero where ADV is missing instead of failing (understates cost)")
+    parser.add_argument("--start", default=None, help="YYYY-MM-DD, default: full stored history")
+    parser.add_argument("--end", default=None, help="YYYY-MM-DD, default: full stored history")
     args = parser.parse_args()
 
     conn = get_connection()
-    prices = load_prices(conn)
+    prices = load_prices(conn, start=args.start, end=args.end)
     if args.target not in prices.columns or args.pair not in prices.columns:
         raise SystemExit("Target or pair ticker not found in stored prices.")
 
     names = ticker_names(conn)
     both = prices[[args.target, args.pair]].dropna()
+    print(f"기간: {period_label(both.index)}")
+    # If --no-gmm, the regime filter never runs, so its 250-day refit window
+    # isn't part of this run's actual warmup - only beta/z-score estimation is.
+    warmup_days = args.gmm_window if not args.no_gmm else args.beta_window + args.z_window
+    warn_thin_warmup(len(both), warmup_days)
     t_name, p_name = names.get(args.target, args.target), names.get(args.pair, args.pair)
 
     cost_model, target_adv, pair_adv = None, None, None

@@ -53,7 +53,7 @@ import pandas as pd
 
 from backtest import _summarize, walk_forward_beta
 from hmm import GaussianHMM
-from store import get_connection, load_prices, ticker_names
+from store import get_connection, load_prices, period_label, ticker_names, warn_thin_warmup
 
 
 def regime_proba(
@@ -184,16 +184,20 @@ def main() -> None:
         help="Require P(calm) above this to hold/enter; higher = fewer, more confident entries",
     )
     parser.add_argument("--compare", action="store_true", help="Also run the GMM filter side by side")
+    parser.add_argument("--start", default=None, help="YYYY-MM-DD, default: full stored history")
+    parser.add_argument("--end", default=None, help="YYYY-MM-DD, default: full stored history")
     parser.add_argument("--out", default=None)
     args = parser.parse_args()
 
     conn = get_connection()
-    prices = load_prices(conn)
+    prices = load_prices(conn, start=args.start, end=args.end)
     if args.target not in prices.columns or args.pair not in prices.columns:
         raise SystemExit("Target or pair ticker not found in stored prices.")
 
     names = ticker_names(conn)
     both = prices[[args.target, args.pair]].dropna()
+    print(f"기간: {period_label(both.index)}")
+    warn_thin_warmup(len(both), args.hmm_window)
     t_name = names.get(args.target, args.target)
     p_name = names.get(args.pair, args.pair)
 

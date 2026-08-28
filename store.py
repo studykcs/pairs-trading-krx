@@ -123,6 +123,35 @@ def ticker_names(conn: sqlite3.Connection) -> dict[str, str]:
     return dict(conn.execute("SELECT ticker, name FROM tickers").fetchall())
 
 
+def period_label(index: pd.DatetimeIndex) -> str:
+    """'{start} .. {end} ({n:,} 거래일)' - printed at the top of every backtest
+    script's output so a result is traceable to the period actually used
+    (post --start/--end, post per-pair dropna), not assumed to be "the whole
+    history" by default."""
+    if len(index) == 0:
+        return "no data"
+    return f"{index.min().date()} .. {index.max().date()} ({len(index):,} 거래일)"
+
+
+def warn_thin_warmup(n_days: int, warmup_days: int) -> None:
+    """Warns when a requested date range is thin relative to the warmup a
+    walk-forward / regime-filtered strategy needs before it produces any
+    signal at all (beta re-estimation window + z-score window + GMM/HMM
+    refit window - `warmup_days` is normally just the GMM/HMM window, since
+    with the defaults (beta 120 + z 60 + gmm/hmm 250) it's the largest of the
+    three and therefore the binding constraint).
+
+    The 2x-warmup threshold is a documented rule of thumb, not a validated
+    cutoff - below it, a large share of the requested window has no
+    tradeable signal in it at all, so total-return/Sharpe over that window
+    reflect mostly warmup, not strategy behavior.
+    """
+    if n_days < warmup_days * 2:
+        pct = warmup_days / n_days * 100 if n_days else 100.0
+        print(f"WARNING: 워밍업({warmup_days}거래일)이 표본의 {pct:.0f}%를 차지합니다 - "
+              f"결과 해석에 주의하세요.\n")
+
+
 def load_prices(
     conn: sqlite3.Connection, start: str | None = None, end: str | None = None
 ) -> pd.DataFrame:

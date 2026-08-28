@@ -35,7 +35,7 @@ import pandas as pd
 from sklearn.mixture import GaussianMixture
 
 from backtest import _summarize, hedge_ratio, run_backtest_walkforward, walk_forward_beta
-from store import get_connection, load_prices, ticker_names
+from store import get_connection, load_prices, period_label, ticker_names, warn_thin_warmup
 
 
 def regime_labels(
@@ -119,16 +119,20 @@ def main() -> None:
     parser.add_argument("--gmm-window", type=int, default=250, help="Trailing days used to fit each GMM refit")
     parser.add_argument("--entry", type=float, default=2.0)
     parser.add_argument("--exit-z", type=float, default=0.5)
+    parser.add_argument("--start", default=None, help="YYYY-MM-DD, default: full stored history")
+    parser.add_argument("--end", default=None, help="YYYY-MM-DD, default: full stored history")
     parser.add_argument("--out", default=None, help="Optional CSV path for the day-by-day series")
     args = parser.parse_args()
 
     conn = get_connection()
-    prices = load_prices(conn)
+    prices = load_prices(conn, start=args.start, end=args.end)
     if args.target not in prices.columns or args.pair not in prices.columns:
         raise SystemExit("Target or pair ticker not found in stored prices.")
 
     names = ticker_names(conn)
     both = prices[[args.target, args.pair]].dropna()
+    print(f"기간: {period_label(both.index)}")
+    warn_thin_warmup(len(both), args.gmm_window)
     t_name, p_name = names.get(args.target, args.target), names.get(args.pair, args.pair)
 
     base_df, base_stats = run_backtest_walkforward(

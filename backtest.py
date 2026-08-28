@@ -33,7 +33,15 @@ import numpy as np
 import pandas as pd
 import statsmodels.api as sm
 
-from store import get_connection, load_prices, ticker_names
+from store import get_connection, load_prices, period_label, ticker_names, warn_thin_warmup
+
+# Shared reference constant, not something this file computes: gmm_strategy.py
+# and strategy.py default their GMM refit window to 250 days, which is the
+# binding warmup constraint across the whole strategy family (bigger than
+# beta_window=120 or z_window=60). backtest.py has no regime filter of its
+# own, but using the same number here keeps its warmup accounting comparable
+# to the regime-filtered variants when the same --start/--end is used on both.
+REFERENCE_GMM_WINDOW = 250
 
 
 def hedge_ratio(log_target: pd.Series, log_pair: pd.Series) -> tuple[float, float] | None:
@@ -171,16 +179,20 @@ def main() -> None:
     parser.add_argument("--z-window", type=int, default=60, help="[walkforward] rolling window for the spread z-score")
     parser.add_argument("--entry", type=float, default=2.0, help="|z| to enter a position")
     parser.add_argument("--exit-z", type=float, default=0.5, help="|z| to flatten a position")
+    parser.add_argument("--start", default=None, help="YYYY-MM-DD, default: full stored history")
+    parser.add_argument("--end", default=None, help="YYYY-MM-DD, default: full stored history")
     parser.add_argument("--out", default=None, help="Optional CSV path for the day-by-day series")
     args = parser.parse_args()
 
     conn = get_connection()
-    prices = load_prices(conn)
+    prices = load_prices(conn, start=args.start, end=args.end)
     if args.target not in prices.columns or args.pair not in prices.columns:
         raise SystemExit("Target or pair ticker not found in stored prices.")
 
     names = ticker_names(conn)
     both = prices[[args.target, args.pair]].dropna()
+    print(f"기간: {period_label(both.index)}")
+    warn_thin_warmup(len(both), REFERENCE_GMM_WINDOW)
 
     if args.method == "static":
         df, stats = run_backtest_static(both[args.target], both[args.pair], args.window, args.entry, args.exit_z)
